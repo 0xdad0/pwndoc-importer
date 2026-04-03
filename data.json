@@ -1,0 +1,8 @@
+{
+  "csvPath": "C:\\Users\\path\\vulnerabilities.csv",
+  "locale": "",
+  "owaspFieldId": "cf_62d92f1597c7c5001833273f",
+  "cweFieldId": "cf_63ab317fafe66f0011b89881",
+  "targetFolder": "vulns",
+  "notePrefix": "VT"
+}
