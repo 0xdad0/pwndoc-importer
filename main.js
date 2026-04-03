@@ -195,10 +195,6 @@ const DEFAULT_SETTINGS = {
     locale: 'EN-en',
     owaspFieldId: 'cf_62d92f1597c7c5001833273f',
     cweFieldId:   'cf_63ab317fafe66f0011b89881',
-    pwndocUrl:       '',
-    pwndocUsername:  '',
-    pwndocPassword:  '',
-    pwndocIgnoreSsl: false,
 };
 
 // ── Modal: fuzzy search over vuln list ────────────────────────────────────────
@@ -296,6 +292,130 @@ class FolderModal extends Modal {
     onClose() { this.contentEl.empty(); }
 }
 
+// ── CSV serialiser ────────────────────────────────────────────────────────────
+function rowsToCsv(rows) {
+    if (!rows.length) return '';
+    const seen = {};
+    for (const row of rows) for (const k of Object.keys(row)) seen[k] = true;
+    const headers = Object.keys(seen);
+    const esc = v => {
+        const s = String(v ?? '');
+        return (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r'))
+            ? '"' + s.replace(/"/g, '""') + '"'
+            : s;
+    };
+    const lines = [headers.map(esc).join(',')];
+    for (const row of rows) lines.push(headers.map(h => esc(row[h] ?? '')).join(','));
+    return lines.join('\r\n');
+}
+
+// ── Modal: PwnDoc API credentials (never saved to vault) ─────────────────────
+class ApiCredentialsModal extends Modal {
+    constructor(app, onConnect) {
+        super(app);
+        this.onConnect = onConnect; // ({url, username, password, ignoreSsl}) => void
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.empty();
+        contentEl.createEl('h3', { text: 'Connect to PwnDoc' });
+
+        const mkRow = (label, inputFn) => {
+            const wrap = contentEl.createEl('div');
+            wrap.style.cssText = 'display:flex;flex-direction:column;margin-bottom:10px;';
+            wrap.createEl('label', { text: label }).style.cssText = 'font-size:0.85em;margin-bottom:3px;';
+            return inputFn(wrap);
+        };
+
+        const urlInput = mkRow('URL (e.g. https://localhost:8443)', wrap => {
+            const el = wrap.createEl('input', { type: 'text' });
+            el.placeholder = 'https://localhost:8443';
+            el.style.cssText = 'width:100%;';
+            return el;
+        });
+
+        const userInput = mkRow('Username', wrap => {
+            const el = wrap.createEl('input', { type: 'text' });
+            el.style.cssText = 'width:100%;';
+            return el;
+        });
+
+        const passInput = mkRow('Password', wrap => {
+            const el = wrap.createEl('input', { type: 'password' });
+            el.style.cssText = 'width:100%;';
+            return el;
+        });
+
+        // Ignore SSL row (checkbox + label inline)
+        const sslWrap = contentEl.createEl('div');
+        sslWrap.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:14px;';
+        const sslCheck = sslWrap.createEl('input', { type: 'checkbox' });
+        sslWrap.createEl('span', { text: 'Ignore SSL certificate errors (self-signed certs)' })
+               .style.cssText = 'font-size:0.85em;';
+
+        const btn = contentEl.createEl('button', { text: 'Connect', cls: 'mod-cta' });
+        btn.style.cssText = 'width:100%;';
+        const doConnect = () => {
+            const url      = urlInput.value.trim();
+            const username = userInput.value.trim();
+            const password = passInput.value;
+            if (!url)      { new Notice('Please enter the PwnDoc URL.');      return; }
+            if (!username) { new Notice('Please enter your username.');        return; }
+            if (!password) { new Notice('Please enter your password.');        return; }
+            this.close();
+            this.onConnect({ url, username, password, ignoreSsl: sslCheck.checked });
+        };
+        btn.onclick = doConnect;
+        passInput.addEventListener('keydown', e => { if (e.key === 'Enter') doConnect(); });
+        urlInput.focus();
+    }
+
+    onClose() { this.contentEl.empty(); }
+}
+
+// ── Modal: choose where to save the fetched CSV ───────────────────────────────
+class CsvOutputModal extends Modal {
+    constructor(app, onChoose) {
+        super(app);
+        this.onChoose = onChoose; // (absolutePath | null) => void
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.empty();
+        contentEl.createEl('h3', { text: 'Save fetched vulnerabilities as CSV?' });
+        contentEl.createEl('p', {
+            text: 'Enter an absolute folder path. The file will be saved as vulnerabilities.csv inside it.',
+            cls: 'setting-item-description',
+        });
+
+        const input = contentEl.createEl('input', { type: 'text' });
+        input.placeholder = 'C:/tools/pwndoc  or  /home/user/pwndoc';
+        input.style.cssText = 'width:100%;margin-bottom:10px;';
+
+        const saveBtn = contentEl.createEl('button', { text: 'Save & Import', cls: 'mod-cta' });
+        saveBtn.style.cssText = 'width:100%;margin-bottom:6px;';
+        saveBtn.onclick = () => {
+            const folder = input.value.trim();
+            if (!folder) { new Notice('Please enter a folder path.'); return; }
+            this.close();
+            // Normalise slashes and append filename
+            const sep = folder.includes('\\') ? '\\' : '/';
+            this.onChoose(folder.replace(/[\\/]+$/, '') + sep + 'vulnerabilities.csv');
+        };
+
+        const skipBtn = contentEl.createEl('button', { text: 'Skip (import without saving)' });
+        skipBtn.style.cssText = 'width:100%;';
+        skipBtn.onclick = () => { this.close(); this.onChoose(null); };
+
+        input.addEventListener('keydown', e => { if (e.key === 'Enter') saveBtn.click(); });
+        input.focus();
+    }
+
+    onClose() { this.contentEl.empty(); }
+}
+
 // ── Settings tab ──────────────────────────────────────────────────────────────
 class PwnDocSettingTab extends PluginSettingTab {
     constructor(app, plugin) {
@@ -344,40 +464,6 @@ class PwnDocSettingTab extends PluginSettingTab {
                 .setValue(this.plugin.settings.cweFieldId)
                 .onChange(async v => { this.plugin.settings.cweFieldId = v.trim(); await this.plugin.saveSettings(); }));
 
-        containerEl.createEl('h3', { text: 'PwnDoc API connection' });
-        containerEl.createEl('p', {
-            text: 'Connect directly to PwnDoc to fetch vulnerabilities without a CSV file.',
-            cls: 'setting-item-description',
-        });
-
-        new Setting(containerEl)
-            .setName('PwnDoc URL')
-            .setDesc('Base URL of your PwnDoc instance, e.g. https://localhost:8443')
-            .addText(t => t
-                .setPlaceholder('https://localhost:8443')
-                .setValue(this.plugin.settings.pwndocUrl)
-                .onChange(async v => { this.plugin.settings.pwndocUrl = v.trim(); await this.plugin.saveSettings(); }));
-
-        new Setting(containerEl)
-            .setName('Username')
-            .addText(t => t
-                .setValue(this.plugin.settings.pwndocUsername)
-                .onChange(async v => { this.plugin.settings.pwndocUsername = v.trim(); await this.plugin.saveSettings(); }));
-
-        new Setting(containerEl)
-            .setName('Password')
-            .addText(t => {
-                t.setValue(this.plugin.settings.pwndocPassword)
-                 .onChange(async v => { this.plugin.settings.pwndocPassword = v; await this.plugin.saveSettings(); });
-                t.inputEl.type = 'password';
-            });
-
-        new Setting(containerEl)
-            .setName('Ignore SSL certificate errors')
-            .setDesc('Enable for self-signed certificates (e.g. local development instances)')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.pwndocIgnoreSsl)
-                .onChange(async v => { this.plugin.settings.pwndocIgnoreSsl = v; await this.plugin.saveSettings(); }));
     }
 }
 
@@ -434,34 +520,52 @@ class PwnDocImporterPlugin extends Plugin {
         new VulnSearchModal(this.app, rows, vuln => this.askPrefix(vuln)).open();
     }
 
-    // API import — fetch directly from PwnDoc
-    async openApiImportModal() {
-        const { pwndocUrl, pwndocUsername, pwndocPassword, pwndocIgnoreSsl, locale } = this.settings;
-        if (!pwndocUrl)      { new Notice('PwnDoc Importer: set the PwnDoc URL in Settings first.');      return; }
-        if (!pwndocUsername) { new Notice('PwnDoc Importer: set the PwnDoc username in Settings first.'); return; }
-        if (!pwndocPassword) { new Notice('PwnDoc Importer: set the PwnDoc password in Settings first.'); return; }
+    // API import — step 1: ask for credentials (never saved)
+    openApiImportModal() {
+        new ApiCredentialsModal(this.app, creds => this.fetchFromApi(creds)).open();
+    }
 
+    // API import — step 2: connect, optionally save CSV, then open vuln search
+    async fetchFromApi({ url, username, password, ignoreSsl }) {
         const notice = new Notice('PwnDoc Importer: connecting…', 0);
+        let rows;
         try {
-            const token = await pwndocLogin(pwndocUrl, pwndocUsername, pwndocPassword, pwndocIgnoreSsl);
+            const token = await pwndocLogin(url, username, password, ignoreSsl);
             notice.setMessage('PwnDoc Importer: fetching vulnerabilities…');
-            const vulns = await pwndocFetchVulns(pwndocUrl, token, pwndocIgnoreSsl);
+            const vulns = await pwndocFetchVulns(url, token, ignoreSsl);
             notice.hide();
 
-            let rows = flattenVulnsFromApi(vulns);
+            rows = flattenVulnsFromApi(vulns);
             if (rows.length === 0) { new Notice('PwnDoc Importer: no vulnerabilities returned from API.'); return; }
-
-            if (locale) {
-                const filtered = rows.filter(r => r.locale === locale);
-                if (filtered.length > 0) rows = filtered;
-            }
-
-            new VulnSearchModal(this.app, rows, vuln => this.askPrefix(vuln)).open();
         } catch (e) {
             notice.hide();
             new Notice(`PwnDoc Importer: ${e.message}`);
             console.error(e);
+            return;
         }
+
+        // Step 3: ask where to save the CSV (or skip)
+        new CsvOutputModal(this.app, async csvPath => {
+            if (csvPath) {
+                try {
+                    require('fs').writeFileSync(csvPath, rowsToCsv(rows), 'utf8');
+                    new Notice(`PwnDoc Importer: CSV saved to ${csvPath}`);
+                } catch (e) {
+                    new Notice(`PwnDoc Importer: could not save CSV — ${e.message}`);
+                    console.error(e);
+                    // Continue anyway — don't block the import
+                }
+            }
+
+            // Step 4: apply locale filter and open search
+            const { locale } = this.settings;
+            let filtered = rows;
+            if (locale) {
+                const f = rows.filter(r => r.locale === locale);
+                if (f.length > 0) filtered = f;
+            }
+            new VulnSearchModal(this.app, filtered, vuln => this.askPrefix(vuln)).open();
+        }).open();
     }
 
     // Step 2 — ask VT or M
