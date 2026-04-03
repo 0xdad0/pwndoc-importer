@@ -104,12 +104,101 @@ async function readFilePath(app, filePath) {
     return await app.vault.adapter.read(normalizePath(filePath));
 }
 
+// ── PwnDoc API client ─────────────────────────────────────────────────────────
+const PRIORITY_MAP_API = { 1: 'Low', 2: 'Medium', 3: 'High', 4: 'Critical' };
+
+function httpsRequest(urlStr, { method = 'GET', headers = {}, body = null, ignoreSsl = false } = {}) {
+    return new Promise((resolve, reject) => {
+        const https = require('https');
+        const url = new URL(urlStr);
+        const options = {
+            hostname: url.hostname,
+            port: url.port || 443,
+            path: url.pathname + url.search,
+            method,
+            headers,
+            rejectUnauthorized: !ignoreSsl,
+        };
+        const req = https.request(options, res => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                if (res.statusCode >= 200 && res.statusCode < 300) resolve(data);
+                else reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`));
+            });
+        });
+        req.on('error', reject);
+        if (body) req.write(body);
+        req.end();
+    });
+}
+
+async function pwndocLogin(baseUrl, username, password, ignoreSsl) {
+    const url = new URL('/api/users/token', baseUrl).toString();
+    const body = JSON.stringify({ username, password, totpToken: '' });
+    const raw = await httpsRequest(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+        body,
+        ignoreSsl,
+    });
+    const data = JSON.parse(raw);
+    const token = data?.datas?.token;
+    if (!token) throw new Error('Login failed: no token in response');
+    return token;
+}
+
+async function pwndocFetchVulns(baseUrl, token, ignoreSsl) {
+    const url = new URL('/api/vulnerabilities', baseUrl).toString();
+    const raw = await httpsRequest(url, {
+        headers: { 'Cookie': `token= JWT ${token}` },
+        ignoreSsl,
+    });
+    const data = JSON.parse(raw);
+    return data?.datas || [];
+}
+
+function flattenVulnsFromApi(vulns) {
+    const rows = [];
+    for (const vuln of vulns) {
+        for (const detail of (vuln.details || [])) {
+            const refs = detail.references || [];
+            const references = Array.isArray(refs) ? refs.join('; ') : String(refs);
+            const row = {
+                id:          vuln._id        || '',
+                cvssv3:      vuln.cvssv3     || '',
+                priority:    PRIORITY_MAP_API[vuln.priority] || String(vuln.priority || ''),
+                category:    vuln.category   || '',
+                locale:      detail.locale   || '',
+                title:       detail.title    || '',
+                description: detail.description || '',
+                observation: detail.observation || '',
+                remediation: detail.remediation || '',
+                references,
+            };
+            for (const cf of (detail.customFields || [])) {
+                if (cf.customField) {
+                    let val = cf.text || '';
+                    if (Array.isArray(val)) val = val.join('; ');
+                    row[`cf_${cf.customField}`] = val;
+                }
+            }
+            rows.push(row);
+        }
+    }
+    return rows;
+}
+
 // ── Settings ──────────────────────────────────────────────────────────────────
 const DEFAULT_SETTINGS = {
     csvPath: '',
     locale: 'EN-en',
     owaspFieldId: 'cf_62d92f1597c7c5001833273f',
     cweFieldId:   'cf_63ab317fafe66f0011b89881',
+    pwndocUrl:       '',
+    pwndocUsername:  '',
+    pwndocPassword:  '',
+    pwndocIgnoreSsl: false,
 };
 
 // ── Modal: fuzzy search over vuln list ────────────────────────────────────────
@@ -254,6 +343,41 @@ class PwnDocSettingTab extends PluginSettingTab {
             .addText(t => t
                 .setValue(this.plugin.settings.cweFieldId)
                 .onChange(async v => { this.plugin.settings.cweFieldId = v.trim(); await this.plugin.saveSettings(); }));
+
+        containerEl.createEl('h3', { text: 'PwnDoc API connection' });
+        containerEl.createEl('p', {
+            text: 'Connect directly to PwnDoc to fetch vulnerabilities without a CSV file.',
+            cls: 'setting-item-description',
+        });
+
+        new Setting(containerEl)
+            .setName('PwnDoc URL')
+            .setDesc('Base URL of your PwnDoc instance, e.g. https://localhost:8443')
+            .addText(t => t
+                .setPlaceholder('https://localhost:8443')
+                .setValue(this.plugin.settings.pwndocUrl)
+                .onChange(async v => { this.plugin.settings.pwndocUrl = v.trim(); await this.plugin.saveSettings(); }));
+
+        new Setting(containerEl)
+            .setName('Username')
+            .addText(t => t
+                .setValue(this.plugin.settings.pwndocUsername)
+                .onChange(async v => { this.plugin.settings.pwndocUsername = v.trim(); await this.plugin.saveSettings(); }));
+
+        new Setting(containerEl)
+            .setName('Password')
+            .addText(t => {
+                t.setValue(this.plugin.settings.pwndocPassword)
+                 .onChange(async v => { this.plugin.settings.pwndocPassword = v; await this.plugin.saveSettings(); });
+                t.inputEl.type = 'password';
+            });
+
+        new Setting(containerEl)
+            .setName('Ignore SSL certificate errors')
+            .setDesc('Enable for self-signed certificates (e.g. local development instances)')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.pwndocIgnoreSsl)
+                .onChange(async v => { this.plugin.settings.pwndocIgnoreSsl = v; await this.plugin.saveSettings(); }));
     }
 }
 
@@ -266,6 +390,11 @@ class PwnDocImporterPlugin extends Plugin {
             id: 'import-vuln-from-csv',
             name: 'Import vulnerability from CSV',
             callback: () => this.openSearchModal(),
+        });
+        this.addCommand({
+            id: 'import-vuln-from-api',
+            name: 'Fetch and import vulnerability from PwnDoc API',
+            callback: () => this.openApiImportModal(),
         });
     }
 
@@ -303,6 +432,36 @@ class PwnDocImporterPlugin extends Plugin {
         }
 
         new VulnSearchModal(this.app, rows, vuln => this.askPrefix(vuln)).open();
+    }
+
+    // API import — fetch directly from PwnDoc
+    async openApiImportModal() {
+        const { pwndocUrl, pwndocUsername, pwndocPassword, pwndocIgnoreSsl, locale } = this.settings;
+        if (!pwndocUrl)      { new Notice('PwnDoc Importer: set the PwnDoc URL in Settings first.');      return; }
+        if (!pwndocUsername) { new Notice('PwnDoc Importer: set the PwnDoc username in Settings first.'); return; }
+        if (!pwndocPassword) { new Notice('PwnDoc Importer: set the PwnDoc password in Settings first.'); return; }
+
+        const notice = new Notice('PwnDoc Importer: connecting…', 0);
+        try {
+            const token = await pwndocLogin(pwndocUrl, pwndocUsername, pwndocPassword, pwndocIgnoreSsl);
+            notice.setMessage('PwnDoc Importer: fetching vulnerabilities…');
+            const vulns = await pwndocFetchVulns(pwndocUrl, token, pwndocIgnoreSsl);
+            notice.hide();
+
+            let rows = flattenVulnsFromApi(vulns);
+            if (rows.length === 0) { new Notice('PwnDoc Importer: no vulnerabilities returned from API.'); return; }
+
+            if (locale) {
+                const filtered = rows.filter(r => r.locale === locale);
+                if (filtered.length > 0) rows = filtered;
+            }
+
+            new VulnSearchModal(this.app, rows, vuln => this.askPrefix(vuln)).open();
+        } catch (e) {
+            notice.hide();
+            new Notice(`PwnDoc Importer: ${e.message}`);
+            console.error(e);
+        }
     }
 
     // Step 2 — ask VT or M

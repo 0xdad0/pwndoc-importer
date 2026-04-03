@@ -30,7 +30,9 @@ An [Obsidian](https://obsidian.md) plugin that imports vulnerabilities from a [P
 
 ## Configuration
 
-Open **Settings → PwnDoc Importer** to configure the plugin:
+Open **Settings → PwnDoc Importer** to configure the plugin.
+
+### CSV source
 
 | Setting | Default | Description |
 |---|---|---|
@@ -41,18 +43,32 @@ Open **Settings → PwnDoc Importer** to configure the plugin:
 
 The OWASP and CWE column IDs correspond to the custom field IDs used in your PwnDoc instance. Check your PwnDoc export headers if the defaults do not match.
 
+### PwnDoc API connection
+
+| Setting | Default | Description |
+|---|---|---|
+| **PwnDoc URL** | *(empty)* | Base URL of your PwnDoc instance, e.g. `https://localhost:8443` |
+| **Username** | *(empty)* | PwnDoc login username |
+| **Password** | *(empty)* | PwnDoc login password (stored in Obsidian's plugin data file) |
+| **Ignore SSL certificate errors** | off | Enable for self-signed certificates (typical for local instances) |
+
 ## Usage
 
-1. Open the command palette (`Ctrl+P` / `Cmd+P`).
-2. Run **Import vulnerability from CSV**.
-3. Search for the vulnerability you want to import using the fuzzy-search modal (shows title, locale, category, and priority).
-4. Choose the note prefix:
-   - **VT** — Vulnerability Ticket (standard web/network findings)
-   - **M** — Mobile (Android/iOS findings)
-5. Choose the target folder:
-   - Press `Enter` with no input to use the folder of the currently active file.
-   - Type a vault-relative path (e.g. `client/project/vulns`) and press `Enter`.
-6. The note is created and opened automatically.
+Two import commands are available from the command palette (`Ctrl+P` / `Cmd+P`).
+
+### From CSV
+
+1. Run **Import vulnerability from CSV**.
+2. Search for the vulnerability using the fuzzy-search modal (shows title, locale, category, and priority).
+3. Choose the note prefix (**VT** or **M**).
+4. Choose the target folder (current folder or custom vault path).
+5. The note is created and opened automatically.
+
+### From PwnDoc API
+
+1. Run **Fetch and import vulnerability from PwnDoc API**.
+2. The plugin authenticates against your PwnDoc instance, fetches all vulnerabilities, and applies the locale filter from settings.
+3. Search, choose prefix, and choose folder — same flow as the CSV import.
 
 ## Generated Note Structure
 
