@@ -158,7 +158,29 @@ async function pwndocFetchVulns(baseUrl, token, ignoreSsl) {
     return data?.datas || [];
 }
 
-function flattenVulnsFromApi(vulns) {
+async function pwndocFetchCustomFields(baseUrl, token, ignoreSsl, dbg) {
+    const url = new URL('/api/data/custom-fields', baseUrl).toString();
+    dbg('pwndocFetchCustomFields: GET', url);
+    const raw = await httpsRequest(url, {
+        headers: { 'Cookie': `token= JWT ${token}` },
+        ignoreSsl,
+    });
+    const data = JSON.parse(raw);
+    dbg('pwndocFetchCustomFields: raw datas', data?.datas);
+    const map = {};
+    for (const cf of (data?.datas || [])) {
+        if (cf._id) {
+            map[cf._id] = cf.label || cf._id;
+            dbg(`  mapped ${cf._id} → "${map[cf._id]}" (label="${cf.label}")`);
+        }
+    }
+    dbg('pwndocFetchCustomFields: final map', map);
+    return map;
+}
+
+const STANDARD_FIELDS = new Set(['id', 'cvssv3', 'priority', 'category', 'locale', 'title', 'description', 'observation', 'remediation', 'references']);
+
+function flattenVulnsFromApi(vulns, cfLabels = {}) {
     const rows = [];
     for (const vuln of vulns) {
         for (const detail of (vuln.details || [])) {
@@ -178,9 +200,10 @@ function flattenVulnsFromApi(vulns) {
             };
             for (const cf of (detail.customFields || [])) {
                 if (cf.customField) {
+                    const key = cfLabels[cf.customField] || `cf_${cf.customField}`;
                     let val = cf.text || '';
                     if (Array.isArray(val)) val = val.join('; ');
-                    row[`cf_${cf.customField}`] = val;
+                    row[key] = val;
                 }
             }
             rows.push(row);
@@ -191,10 +214,16 @@ function flattenVulnsFromApi(vulns) {
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 const DEFAULT_SETTINGS = {
-    csvPath: '',
-    locale: 'EN-en',
-    owaspFieldId: 'cf_62d92f1597c7c5001833273f',
-    cweFieldId:   'cf_63ab317fafe66f0011b89881',
+    csvPath:         '',
+    locale:          'EN-en',
+    owaspFieldId:    'cf_62d92f1597c7c5001833273f',
+    cweFieldId:      'cf_63ab317fafe66f0011b89881',
+    apiUrl:          '',
+    apiUsername:     '',
+    apiPassword:     '',
+    apiIgnoreSsl:    false,
+    csvOutputFolder: '',
+    debugMode:       false,
 };
 
 // ── Modal: fuzzy search over vuln list ────────────────────────────────────────
@@ -309,11 +338,12 @@ function rowsToCsv(rows) {
     return lines.join('\r\n');
 }
 
-// ── Modal: PwnDoc API credentials (never saved to vault) ─────────────────────
+// ── Modal: PwnDoc API credentials ────────────────────────────────────────────
 class ApiCredentialsModal extends Modal {
-    constructor(app, onConnect) {
+    constructor(app, settings, onConnect) {
         super(app);
-        this.onConnect = onConnect; // ({url, username, password, ignoreSsl}) => void
+        this.settings  = settings;
+        this.onConnect = onConnect; // ({url, username, password, ignoreSsl, save}) => void
     }
 
     onOpen() {
@@ -328,43 +358,53 @@ class ApiCredentialsModal extends Modal {
             return inputFn(wrap);
         };
 
-        const urlInput = mkRow('URL (e.g. https://localhost:8443)', wrap => {
+        const mkCheck = (labelText, checked) => {
+            const wrap = contentEl.createEl('div');
+            wrap.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:10px;';
+            const el = wrap.createEl('input', { type: 'checkbox' });
+            el.checked = checked;
+            wrap.createEl('span', { text: labelText }).style.cssText = 'font-size:0.85em;';
+            return el;
+        };
+
+        const s = this.settings;
+
+        const urlInput  = mkRow('URL (e.g. https://localhost:8443)', wrap => {
             const el = wrap.createEl('input', { type: 'text' });
             el.placeholder = 'https://localhost:8443';
+            el.value = s.apiUrl || '';
             el.style.cssText = 'width:100%;';
             return el;
         });
 
         const userInput = mkRow('Username', wrap => {
             const el = wrap.createEl('input', { type: 'text' });
+            el.value = s.apiUsername || '';
             el.style.cssText = 'width:100%;';
             return el;
         });
 
         const passInput = mkRow('Password', wrap => {
             const el = wrap.createEl('input', { type: 'password' });
+            el.value = s.apiPassword || '';
             el.style.cssText = 'width:100%;';
             return el;
         });
 
-        // Ignore SSL row (checkbox + label inline)
-        const sslWrap = contentEl.createEl('div');
-        sslWrap.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:14px;';
-        const sslCheck = sslWrap.createEl('input', { type: 'checkbox' });
-        sslWrap.createEl('span', { text: 'Ignore SSL certificate errors (self-signed certs)' })
-               .style.cssText = 'font-size:0.85em;';
+        const sslCheck  = mkCheck('Ignore SSL certificate errors (self-signed certs)', s.apiIgnoreSsl || false);
+        const saveCheck = mkCheck('Save credentials in plugin settings', false);
 
         const btn = contentEl.createEl('button', { text: 'Connect', cls: 'mod-cta' });
-        btn.style.cssText = 'width:100%;';
+        btn.style.cssText = 'width:100%;margin-top:4px;';
         const doConnect = () => {
             const url      = urlInput.value.trim();
             const username = userInput.value.trim();
             const password = passInput.value;
-            if (!url)      { new Notice('Please enter the PwnDoc URL.');      return; }
-            if (!username) { new Notice('Please enter your username.');        return; }
-            if (!password) { new Notice('Please enter your password.');        return; }
+            if (!url)      { new Notice('Please enter the PwnDoc URL.');  return; }
+            if (!username) { new Notice('Please enter your username.');    return; }
+            if (!password) { new Notice('Please enter your password.');    return; }
             this.close();
-            this.onConnect({ url, username, password, ignoreSsl: sslCheck.checked });
+            this.onConnect({ url, username, password, ignoreSsl: sslCheck.checked, save: saveCheck.checked });
         };
         btn.onclick = doConnect;
         passInput.addEventListener('keydown', e => { if (e.key === 'Enter') doConnect(); });
@@ -376,8 +416,9 @@ class ApiCredentialsModal extends Modal {
 
 // ── Modal: choose where to save the fetched CSV ───────────────────────────────
 class CsvOutputModal extends Modal {
-    constructor(app, onChoose) {
+    constructor(app, defaultFolder, onChoose) {
         super(app);
+        this.defaultFolder = defaultFolder;
         this.onChoose = onChoose; // (absolutePath | null) => void
     }
 
@@ -392,6 +433,7 @@ class CsvOutputModal extends Modal {
 
         const input = contentEl.createEl('input', { type: 'text' });
         input.placeholder = 'C:/tools/pwndoc  or  /home/user/pwndoc';
+        input.value = this.defaultFolder || '';
         input.style.cssText = 'width:100%;margin-bottom:10px;';
 
         const saveBtn = contentEl.createEl('button', { text: 'Save & Import', cls: 'mod-cta' });
@@ -400,7 +442,6 @@ class CsvOutputModal extends Modal {
             const folder = input.value.trim();
             if (!folder) { new Notice('Please enter a folder path.'); return; }
             this.close();
-            // Normalise slashes and append filename
             const sep = folder.includes('\\') ? '\\' : '/';
             this.onChoose(folder.replace(/[\\/]+$/, '') + sep + 'vulnerabilities.csv');
         };
@@ -464,6 +505,58 @@ class PwnDocSettingTab extends PluginSettingTab {
                 .setValue(this.plugin.settings.cweFieldId)
                 .onChange(async v => { this.plugin.settings.cweFieldId = v.trim(); await this.plugin.saveSettings(); }));
 
+        containerEl.createEl('h3', { text: 'API credentials' });
+        containerEl.createEl('p', {
+            text: 'Credentials are stored in plain text in the plugin data file. Leave blank to be prompted each time.',
+            cls: 'setting-item-description',
+        });
+
+        new Setting(containerEl)
+            .setName('PwnDoc URL')
+            .addText(t => t
+                .setPlaceholder('https://localhost:8443')
+                .setValue(this.plugin.settings.apiUrl)
+                .onChange(async v => { this.plugin.settings.apiUrl = v.trim(); await this.plugin.saveSettings(); }));
+
+        new Setting(containerEl)
+            .setName('Username')
+            .addText(t => t
+                .setValue(this.plugin.settings.apiUsername)
+                .onChange(async v => { this.plugin.settings.apiUsername = v.trim(); await this.plugin.saveSettings(); }));
+
+        new Setting(containerEl)
+            .setName('Password')
+            .addText(t => {
+                t.inputEl.type = 'password';
+                t.setValue(this.plugin.settings.apiPassword)
+                 .onChange(async v => { this.plugin.settings.apiPassword = v; await this.plugin.saveSettings(); });
+            });
+
+        new Setting(containerEl)
+            .setName('Ignore SSL certificate errors')
+            .setDesc('Enable for self-signed certificates')
+            .addToggle(tg => tg
+                .setValue(this.plugin.settings.apiIgnoreSsl)
+                .onChange(async v => { this.plugin.settings.apiIgnoreSsl = v; await this.plugin.saveSettings(); }));
+
+        containerEl.createEl('h3', { text: 'CSV output' });
+
+        new Setting(containerEl)
+            .setName('Default CSV output folder')
+            .setDesc('Absolute path to the folder where vulnerabilities.csv will be saved after an API fetch. Leave blank to be prompted each time.')
+            .addText(t => t
+                .setPlaceholder('C:/tools/pwndoc')
+                .setValue(this.plugin.settings.csvOutputFolder)
+                .onChange(async v => { this.plugin.settings.csvOutputFolder = v.trim(); await this.plugin.saveSettings(); }));
+
+        containerEl.createEl('h3', { text: 'Debug' });
+
+        new Setting(containerEl)
+            .setName('Debug mode')
+            .setDesc('Log detailed information to the browser console (Ctrl+Shift+I → Console) during API imports.')
+            .addToggle(tg => tg
+                .setValue(this.plugin.settings.debugMode)
+                .onChange(async v => { this.plugin.settings.debugMode = v; await this.plugin.saveSettings(); }));
     }
 }
 
@@ -488,6 +581,10 @@ class PwnDocImporterPlugin extends Plugin {
         this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     }
     async saveSettings() { await this.saveData(this.settings); }
+
+    dbg(...args) {
+        if (this.settings.debugMode) console.log('[PwnDoc Importer]', ...args);
+    }
 
     // Step 1 — load CSV and open vuln search
     async openSearchModal() {
@@ -520,22 +617,39 @@ class PwnDocImporterPlugin extends Plugin {
         new VulnSearchModal(this.app, rows, vuln => this.askPrefix(vuln)).open();
     }
 
-    // API import — step 1: ask for credentials (never saved)
+    // API import — step 1: ask for credentials (pre-filled from settings)
     openApiImportModal() {
-        new ApiCredentialsModal(this.app, creds => this.fetchFromApi(creds)).open();
+        new ApiCredentialsModal(this.app, this.settings, creds => this.fetchFromApi(creds)).open();
     }
 
     // API import — step 2: connect, optionally save CSV, then open vuln search
-    async fetchFromApi({ url, username, password, ignoreSsl }) {
+    async fetchFromApi({ url, username, password, ignoreSsl, save }) {
+        if (save) {
+            this.settings.apiUrl      = url;
+            this.settings.apiUsername = username;
+            this.settings.apiPassword = password;
+            this.settings.apiIgnoreSsl = ignoreSsl;
+            await this.saveSettings();
+        }
+        const dbg = this.dbg.bind(this);
         const notice = new Notice('PwnDoc Importer: connecting…', 0);
         let rows;
         try {
+            dbg('logging in to', url);
             const token = await pwndocLogin(url, username, password, ignoreSsl);
+            dbg('login OK, fetching vulns + custom fields');
             notice.setMessage('PwnDoc Importer: fetching vulnerabilities…');
-            const vulns = await pwndocFetchVulns(url, token, ignoreSsl);
+            const [vulns, cfLabels] = await Promise.all([
+                pwndocFetchVulns(url, token, ignoreSsl),
+                pwndocFetchCustomFields(url, token, ignoreSsl, dbg).catch(e => { dbg('custom fields fetch failed:', e.message); return {}; }),
+            ]);
             notice.hide();
 
-            rows = flattenVulnsFromApi(vulns);
+            dbg(`fetched ${vulns.length} vulns, ${Object.keys(cfLabels).length} custom field definitions`);
+            dbg('cfLabels map:', cfLabels);
+            this.cfLabels = cfLabels;
+            rows = flattenVulnsFromApi(vulns, cfLabels);
+            dbg(`flattened to ${rows.length} rows; sample keys:`, rows[0] ? Object.keys(rows[0]) : []);
             if (rows.length === 0) { new Notice('PwnDoc Importer: no vulnerabilities returned from API.'); return; }
         } catch (e) {
             notice.hide();
@@ -545,7 +659,7 @@ class PwnDocImporterPlugin extends Plugin {
         }
 
         // Step 3: ask where to save the CSV (or skip)
-        new CsvOutputModal(this.app, async csvPath => {
+        new CsvOutputModal(this.app, this.settings.csvOutputFolder, async csvPath => {
             if (csvPath) {
                 try {
                     require('fs').writeFileSync(csvPath, rowsToCsv(rows), 'utf8');
@@ -605,9 +719,23 @@ class PwnDocImporterPlugin extends Plugin {
             ? (platformMap[vuln.category] || 'Android')
             : (platformMap[vuln.category] || 'WEB');
 
-        // OWASP + CWE
-        const owasp = vuln[this.settings.owaspFieldId] || '';
-        const cwe   = vuln[this.settings.cweFieldId]   || '';
+        // OWASP + CWE — resolve setting id (may be cf_<id> or label) to actual row key
+        const cfLabels = this.cfLabels || {};
+        const resolveKey = s => (s.startsWith('cf_') && cfLabels[s.slice(3)]) ? cfLabels[s.slice(3)] : s;
+        const owaspKey = resolveKey(this.settings.owaspFieldId);
+        const cweKey   = resolveKey(this.settings.cweFieldId);
+        const owasp = vuln[owaspKey] || '';
+        const cwe   = vuln[cweKey]   || '';
+
+        // Extra custom fields (non-standard, non-owasp/cwe, non-empty)
+        const reservedKeys = new Set([owaspKey, cweKey, this.settings.owaspFieldId, this.settings.cweFieldId]);
+        const extraCf = Object.keys(vuln)
+            .filter(k => !STANDARD_FIELDS.has(k) && !reservedKeys.has(k))
+            .map(k => ({
+                label: k,
+                value: stripHtml(vuln[k] || '').trim(),
+            }))
+            .filter(({ value }) => value !== '');
 
         // Content sections (HTML stripped)
         const description  = stripHtml(vuln.description);
@@ -618,6 +746,11 @@ class PwnDocImporterPlugin extends Plugin {
         const title    = (vuln.title || 'Untitled').replace(/[\\/:*?"<>|]/g, '-');
         const noteName = `${prefix}-${num} - ${title}`;
         const filePath = folder ? `${folder}/${noteName}.md` : `${noteName}.md`;
+
+        // Custom fields section at the end
+        const cfSection = extraCf.length > 0
+            ? ['## Custom Fields', '', ...extraCf.flatMap(({ label, value }) => [`**${label}**`, '', value, ''])]
+            : [];
 
         const content = [
             '---',
@@ -662,7 +795,8 @@ class PwnDocImporterPlugin extends Plugin {
             '',
             remediation,
             '',
-            ...(references ? ['## References', '', references] : []),
+            ...(references ? ['## References', '', references, ''] : []),
+            ...cfSection,
         ].join('\n').trimEnd() + '\n';
 
         try {

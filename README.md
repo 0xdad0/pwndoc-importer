@@ -6,11 +6,12 @@ An [Obsidian](https://obsidian.md) plugin that imports vulnerabilities from a [P
 
 - Import vulnerabilities from a PwnDoc CSV export via fuzzy-search modal
 - Fetch vulnerabilities directly from the PwnDoc API without a pre-exported file
-- Credentials for API access are entered in a popup and **never saved** to the vault
-- Optionally save the fetched API data as a local CSV for future offline use
+- API credentials can be saved in plugin settings or entered in a popup at import time
+- Optionally save the fetched API data as a local CSV for future offline use, with a configurable default output folder
 - Automatically calculate CVSS 3.1 scores and severity ratings
 - Convert HTML-formatted PwnDoc fields to clean plain text
 - Generate pre-structured notes with YAML frontmatter (severity, platform, CVSS data, OWASP category, CWE)
+- Automatically fetch custom field definitions from the API and append all non-empty custom fields as a **Custom Fields** section at the end of the note, using human-readable labels (`displaySub`)
 - Filter vulnerabilities by locale (`EN-en`, `IT-it`, or all)
 - Choose between **VT** (Vulnerability Ticket) or **M** (Mobile) note prefixes
 - Auto-number notes sequentially (`VT-01`, `VT-02`, …)
@@ -34,16 +35,44 @@ An [Obsidian](https://obsidian.md) plugin that imports vulnerabilities from a [P
 
 Open **Settings → PwnDoc Importer** to configure the plugin.
 
+### General
+
 | Setting | Default | Description |
 |---|---|---|
 | **CSV file path** | *(empty)* | Absolute or vault-relative path to a PwnDoc vulnerabilities CSV export |
 | **Locale filter** | `EN-en` | Filter vulnerabilities by language (`EN-en`, `IT-it`, or `All`) |
-| **OWASP field column ID** | `cf_62d92f1597c7c5001833273f` | CSV column ID containing OWASP category data |
-| **CWE field column ID** | `cf_63ab317fafe66f0011b89881` | CSV column ID containing CWE identifier data |
 
-The OWASP and CWE column IDs match the custom field IDs in your PwnDoc instance. Check the CSV export headers if the defaults do not match.
+### Custom field IDs
 
-> API credentials (URL, username, password) are **not stored in settings**. They are entered in a popup each time you run the API import command.
+| Setting | Default | Description |
+|---|---|---|
+| **OWASP field column** | `cf_62d92f1597c7c5001833273f` | Field ID for OWASP category (matches the `_id` in PwnDoc custom fields) |
+| **CWE field column** | `cf_63ab317fafe66f0011b89881` | Field ID for CWE identifier |
+
+These values must match the `_id` of the corresponding custom fields in your PwnDoc instance.
+
+### API credentials
+
+| Setting | Description |
+|---|---|
+| **PwnDoc URL** | Base URL of the PwnDoc instance (e.g. `https://localhost:8443`) |
+| **Username** | PwnDoc username |
+| **Password** | PwnDoc password — stored in plain text in the plugin data file |
+| **Ignore SSL certificate errors** | Enable for self-signed certificates |
+
+If any credential field is left blank, the plugin will prompt for credentials at import time. Credentials can also be saved from the import popup by checking **Save credentials in plugin settings**.
+
+### CSV output
+
+| Setting | Description |
+|---|---|
+| **Default CSV output folder** | Absolute path to the folder where `vulnerabilities.csv` will be saved after an API fetch. Leave blank to be prompted each time. |
+
+### Debug
+
+| Setting | Default | Description |
+|---|---|---|
+| **Debug mode** | `off` | When enabled, logs detailed information to the browser console during API imports. Open the developer tools with `Ctrl+Shift+I` and filter by `[PwnDoc Importer]` in the Console tab. |
 
 ## Usage
 
@@ -60,9 +89,9 @@ Two import commands are available from the command palette (`Ctrl+P` / `Cmd+P`).
 ### From PwnDoc API
 
 1. Run **Fetch and import vulnerability from PwnDoc API**.
-2. A **credentials popup** appears — enter the PwnDoc URL, username, password, and optionally enable "Ignore SSL certificate errors" for self-signed certs. Nothing is saved to disk.
-3. The plugin logs in, fetches all vulnerabilities, and shows a **CSV output popup**:
-   - Enter an absolute folder path (e.g. `C:/tools/pwndoc` or `/home/user/pwndoc`) to save the fetched data as `vulnerabilities.csv` for future offline use.
+2. A **credentials popup** appears, pre-filled with any values saved in settings. Adjust if needed, enable **Ignore SSL** for self-signed certs, and optionally check **Save credentials in plugin settings** to persist them.
+3. The plugin logs in, fetches all vulnerabilities and custom field definitions in parallel, then shows a **CSV output popup** pre-filled with the default output folder from settings:
+   - Confirm the folder path to save the fetched data as `vulnerabilities.csv` for future offline use.
    - Click **Skip** to import without saving.
 4. The locale filter from settings is applied, then the usual fuzzy-search → prefix → folder → note flow continues.
 
@@ -94,6 +123,9 @@ assets: "INSERT_ASSET"
 - Assets *(blank — to be filled during the assessment)*
 - Remediation
 - References *(included only when present in the source data)*
+- Custom Fields *(included only when the vulnerability has non-empty custom fields beyond OWASP and CWE; each field is rendered as a bold label followed by its plain-text value)*
+
+**Custom field resolution** — when importing via API, the plugin calls `GET /api/data/custom_fields` in parallel with the vulnerability fetch and builds a map of `_id → displaySub`. This label is used as the column name in the saved CSV and as the section header in the note. When importing from a CSV saved without API metadata, the raw `cf_<id>` key is used as fallback.
 
 Platform is inferred automatically from the PwnDoc category:
 - `WAPT` → `WEB`
@@ -103,7 +135,7 @@ Platform is inferred automatically from the PwnDoc category:
 
 ## CSV Format
 
-The plugin expects a CSV with (at minimum) the following columns. This is the format produced by both the PwnDoc API import (when saving) and the companion `pwndoc_export.py` script.
+The plugin expects a CSV with (at minimum) the following columns. This is the format produced by both the PwnDoc API import (when saving) and any companion export script.
 
 | Column | Description |
 |---|---|
@@ -117,7 +149,7 @@ The plugin expects a CSV with (at minimum) the following columns. This is the fo
 | `observation` | HTML-formatted impact/observation |
 | `remediation` | HTML-formatted remediation steps |
 | `references` | Reference links |
-| *custom field columns* | OWASP and CWE values (column IDs set in plugin settings) |
+| *custom field columns* | Named after the `displaySub` label from PwnDoc (or `cf_<id>` if label is unavailable) |
 
 ## Author
 
