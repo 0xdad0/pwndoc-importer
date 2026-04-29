@@ -224,6 +224,7 @@ const DEFAULT_SETTINGS = {
     apiIgnoreSsl:    false,
     csvOutputFolder: '',
     debugMode:       false,
+    templates:       [], // [{ label: string, path: string, position: 'top'|'bottom' }]
 };
 
 // ── Modal: fuzzy search over vuln list ────────────────────────────────────────
@@ -457,6 +458,24 @@ class CsvOutputModal extends Modal {
     onClose() { this.contentEl.empty(); }
 }
 
+// ── Modal: vault file picker for templates ────────────────────────────────────
+class VaultFileSuggestModal extends FuzzySuggestModal {
+    constructor(app, onChoose) {
+        super(app);
+        this.onChoose = onChoose;
+        this.setPlaceholder('Type to search vault files...');
+    }
+    getItems() {
+        return this.app.vault.getMarkdownFiles().sort((a, b) => a.path.localeCompare(b.path));
+    }
+    getItemText(file) { return file.path; }
+    renderSuggestion(item, el) {
+        el.createEl('div', { text: item.item.basename });
+        el.createEl('small', { text: item.item.parent?.path || '/', cls: 'pwndoc-meta' });
+    }
+    onChooseItem(file) { this.onChoose(file.path.replace(/\.md$/, '')); }
+}
+
 // ── Settings tab ──────────────────────────────────────────────────────────────
 class PwnDocSettingTab extends PluginSettingTab {
     constructor(app, plugin) {
@@ -557,6 +576,84 @@ class PwnDocSettingTab extends PluginSettingTab {
             .addToggle(tg => tg
                 .setValue(this.plugin.settings.debugMode)
                 .onChange(async v => { this.plugin.settings.debugMode = v; await this.plugin.saveSettings(); }));
+
+        // ── Note Templates ────────────────────────────────────────────────────
+        containerEl.createEl('h3', { text: 'Note Templates' });
+        containerEl.createEl('p', {
+            text: 'Vault-relative paths to .md files whose content is inserted at the top (after frontmatter) or bottom of every created vuln note.',
+            cls: 'setting-item-description',
+        });
+
+        const templateListEl = containerEl.createEl('div');
+
+        const renderTemplates = () => {
+            templateListEl.empty();
+            const templates = this.plugin.settings.templates;
+
+            templates.forEach((tpl, idx) => {
+                const row = templateListEl.createEl('div');
+                row.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;';
+
+                const labelIn = row.createEl('input', { type: 'text' });
+                labelIn.placeholder = 'Label (optional)';
+                labelIn.value = tpl.label || '';
+                labelIn.style.cssText = 'flex:1;min-width:100px;';
+                labelIn.addEventListener('change', async () => {
+                    templates[idx].label = labelIn.value.trim();
+                    await this.plugin.saveSettings();
+                });
+
+                const pathIn = row.createEl('input', { type: 'text' });
+                pathIn.placeholder = 'templates/my-template';
+                pathIn.value = tpl.path || '';
+                pathIn.style.cssText = 'flex:3;min-width:180px;';
+                pathIn.addEventListener('change', async () => {
+                    templates[idx].path = pathIn.value.trim().replace(/\.md$/, '');
+                    pathIn.value = templates[idx].path;
+                    await this.plugin.saveSettings();
+                });
+
+                const browseBtn = row.createEl('button', { text: '📂' });
+                browseBtn.title = 'Browse vault files';
+                browseBtn.style.cssText = 'flex:0 0 auto;';
+                browseBtn.onclick = () => {
+                    new VaultFileSuggestModal(this.plugin.app, async chosen => {
+                        templates[idx].path = chosen;
+                        pathIn.value = chosen;
+                        await this.plugin.saveSettings();
+                    }).open();
+                };
+
+                const posSelect = row.createEl('select');
+                posSelect.style.cssText = 'flex:0 0 auto;';
+                for (const pos of ['top', 'bottom']) {
+                    const opt = posSelect.createEl('option', { value: pos, text: pos });
+                    if (tpl.position === pos) opt.selected = true;
+                }
+                posSelect.addEventListener('change', async () => {
+                    templates[idx].position = posSelect.value;
+                    await this.plugin.saveSettings();
+                });
+
+                const delBtn = row.createEl('button', { text: '✕' });
+                delBtn.style.cssText = 'flex:0 0 auto;color:var(--text-error);';
+                delBtn.onclick = async () => {
+                    templates.splice(idx, 1);
+                    await this.plugin.saveSettings();
+                    renderTemplates();
+                };
+            });
+
+            const addBtn = templateListEl.createEl('button', { text: '+ Add template' });
+            addBtn.style.cssText = 'margin-top:6px;';
+            addBtn.onclick = async () => {
+                this.plugin.settings.templates.push({ label: '', path: '', position: 'bottom' });
+                await this.plugin.saveSettings();
+                renderTemplates();
+            };
+        };
+
+        renderTemplates();
     }
 }
 
@@ -752,7 +849,23 @@ class PwnDocImporterPlugin extends Plugin {
             ? ['## Custom Fields', '', ...extraCf.flatMap(({ label, value }) => [`**${label}**`, '', value, ''])]
             : [];
 
-        const content = [
+        // Load top/bottom templates
+        const topChunks    = [];
+        const bottomChunks = [];
+        for (const tpl of (this.settings.templates || [])) {
+            if (!tpl.path) continue;
+            try {
+                const raw = await this.app.vault.adapter.read(normalizePath(tpl.path + '.md'));
+                const chunk = raw.trim();
+                if (tpl.position === 'top') topChunks.push(chunk);
+                else                        bottomChunks.push(chunk);
+            } catch (e) {
+                this.dbg(`template load failed (${tpl.path}): ${e.message}`);
+                new Notice(`PwnDoc Importer: could not read template "${tpl.path}"`);
+            }
+        }
+
+        const frontmatter = [
             '---',
             `severity: ${cvssSeverity}`,
             `platform: ${platform}`,
@@ -767,16 +880,12 @@ class PwnDocImporterPlugin extends Plugin {
             `category: "${vuln.category}"`,
             `assets: "INSERT_ASSET"`,
             '---',
-            '',
-            `| **Severity**       | ${cvssSeverity.padEnd(38)} |`,
-            `| ------------------ | -------------------------------------- |`,
-            `| **CVSS3.1**        | ${cvssVector.padEnd(38)} |`,
-            `| **CVSS Score**     | ${(cvssScore + ' - (' + cvssSeverity + ')').padEnd(38)} |`,
-            `| **OWASP Category** | ${owasp.padEnd(38)} |`,
-            `| **CWE**            | ${cwe.padEnd(38)} |`,
+        ].join('\n');
+
+        const body = [
+            ...(topChunks.length > 0 ? [...topChunks.flatMap(c => [c, '']), ''] : []),
             '',
             '---',
-            '',
             '## Descrizione',
             '',
             description,
@@ -797,7 +906,10 @@ class PwnDocImporterPlugin extends Plugin {
             '',
             ...(references ? ['## References', '', references, ''] : []),
             ...cfSection,
-        ].join('\n').trimEnd() + '\n';
+            ...(bottomChunks.length > 0 ? ['', ...bottomChunks.flatMap(c => [c, ''])] : []),
+        ].join('\n');
+
+        const content = (frontmatter + '\n\n' + body).trimEnd() + '\n';
 
         try {
             if (folder && !this.app.vault.getAbstractFileByPath(folder)) {
