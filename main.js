@@ -248,6 +248,26 @@ class VulnSearchModal extends FuzzySuggestModal {
     onChooseItem(item) { this.onChoose(item); }
 }
 
+// ── Modal: choose import source (ribbon entry point) ─────────────────────────
+class ImportSourceModal extends SuggestModal {
+    constructor(app, onChoose) {
+        super(app);
+        this.onChoose = onChoose;
+        this.setPlaceholder('Select vulnerability source...');
+    }
+    getSuggestions(query) {
+        const options = [
+            { label: 'CSV  — local file',        value: 'csv' },
+            { label: 'API  — live PwnDoc server', value: 'api' },
+        ];
+        return options.filter(o => o.label.toLowerCase().includes(query.toLowerCase()));
+    }
+    renderSuggestion(item, el) {
+        el.createEl('div', { text: item.label });
+    }
+    onChooseSuggestion(item) { this.onChoose(item.value); }
+}
+
 // ── Modal: choose VT or M prefix ─────────────────────────────────────────────
 class PrefixModal extends SuggestModal {
     constructor(app, onChoose) {
@@ -268,58 +288,45 @@ class PrefixModal extends SuggestModal {
     onChooseSuggestion(item) { this.onChoose(item.value); }
 }
 
-// ── Modal: choose target folder ───────────────────────────────────────────────
-class FolderModal extends Modal {
-    /**
-     * @param {import('obsidian').App} app
-     * @param {string} currentFolder   - path of the active file's parent
-     * @param {function(string)} onChoose
-     */
+// ── Modal: choose target folder (fuzzy over vault dirs) ──────────────────────
+class FolderModal extends FuzzySuggestModal {
     constructor(app, currentFolder, onChoose) {
         super(app);
         this.currentFolder = currentFolder;
         this.onChoose = onChoose;
+        this.setPlaceholder('Search vault folder...');
     }
 
-    onOpen() {
-        const { contentEl } = this;
-        contentEl.empty();
-        contentEl.createEl('h3', { text: 'Where should the note be created?' });
-
-        // Option 1 — current folder button
-        const currentLabel = this.currentFolder || '/ (vault root)';
-        const btn = contentEl.createEl('button', {
-            text: `Current folder: ${currentLabel}`,
-            cls: 'mod-cta pwndoc-folder-btn',
-        });
-        btn.style.cssText = 'width:100%;margin-bottom:12px;';
-        btn.onclick = () => { this.close(); this.onChoose(this.currentFolder); };
-
-        // Option 2 — custom folder input
-        contentEl.createEl('p', { text: 'Or type a custom vault folder path:' });
-        const input = contentEl.createEl('input', { type: 'text', cls: 'pwndoc-folder-input' });
-        input.placeholder = 'client/project/vulns';
-        input.style.cssText = 'width:100%;margin-bottom:8px;';
-
-        const confirm = contentEl.createEl('button', { text: 'Use this folder' });
-        confirm.style.cssText = 'width:100%;';
-        confirm.onclick = () => {
-            const val = input.value.trim();
-            if (!val) { new Notice('Please enter a folder path.'); return; }
-            this.close();
-            this.onChoose(val);
-        };
-
-        // Allow Enter key in the input to confirm
-        input.addEventListener('keydown', e => {
-            if (e.key === 'Enter') confirm.click();
-        });
-
-        // Focus the button so keyboard users can immediately press Enter or Tab
-        btn.focus();
+    getItems() {
+        const seen = new Set();
+        seen.add('');
+        for (const file of this.app.vault.getMarkdownFiles()) {
+            let p = file.parent?.path ?? '';
+            while (p && p !== '/') {
+                seen.add(p);
+                const up = p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
+                p = up;
+            }
+        }
+        const folders = [...seen].sort((a, b) => a.localeCompare(b));
+        if (this.currentFolder && seen.has(this.currentFolder)) {
+            return [this.currentFolder, ...folders.filter(f => f !== this.currentFolder)];
+        }
+        return folders;
     }
 
-    onClose() { this.contentEl.empty(); }
+    getItemText(item) { return item || '/ (vault root)'; }
+
+    renderSuggestion(item, el) {
+        const folder = item.item;
+        const label = folder || '/ (vault root)';
+        el.createEl('div', { text: label });
+        if (folder === this.currentFolder) {
+            el.createEl('small', { text: 'current', cls: 'pwndoc-meta' });
+        }
+    }
+
+    onChooseItem(item) { this.onChoose(item); }
 }
 
 // ── CSV serialiser ────────────────────────────────────────────────────────────
@@ -662,6 +669,13 @@ class PwnDocImporterPlugin extends Plugin {
     async onload() {
         await this.loadSettings();
         this.addSettingTab(new PwnDocSettingTab(this.app, this));
+        this.addRibbonIcon('shield-plus', 'Add vulnerability (PwnDoc)', () => {
+            new ImportSourceModal(this.app, source => {
+                if (source === 'csv') this.openSearchModal();
+                else this.openApiImportModal();
+            }).open();
+        });
+
         this.addCommand({
             id: 'import-vuln-from-csv',
             name: 'Import vulnerability from CSV',
