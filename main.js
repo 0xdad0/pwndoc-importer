@@ -298,21 +298,19 @@ class FolderModal extends FuzzySuggestModal {
     }
 
     getItems() {
-        const seen = new Set();
-        seen.add('');
-        for (const file of this.app.vault.getMarkdownFiles()) {
-            let p = file.parent?.path ?? '';
-            while (p && p !== '/') {
-                seen.add(p);
-                const up = p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
-                p = up;
+        const paths = [];
+        const walk = (folder) => {
+            paths.push(folder.path === '/' ? '' : folder.path);
+            for (const child of folder.children) {
+                if (child.children !== undefined) walk(child);
             }
+        };
+        walk(this.app.vault.getRoot());
+        paths.sort((a, b) => a.localeCompare(b));
+        if (this.currentFolder !== undefined && paths.includes(this.currentFolder)) {
+            return [this.currentFolder, ...paths.filter(f => f !== this.currentFolder)];
         }
-        const folders = [...seen].sort((a, b) => a.localeCompare(b));
-        if (this.currentFolder && seen.has(this.currentFolder)) {
-            return [this.currentFolder, ...folders.filter(f => f !== this.currentFolder)];
-        }
-        return folders;
+        return paths;
     }
 
     getItemText(item) { return item || '/ (vault root)'; }
