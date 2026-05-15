@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version from manifest.json
+        id: version
+        run: |
+          VERSION=$(jq -r '.version' manifest.json)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Get latest release tag
+        id: latest
+        run: |
+          LATEST=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "")
+          echo "tag=$LATEST" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if version increased
+        id: compare
+        run: |
+          CURRENT="${{ steps.version.outputs.version }}"
+          LATEST="${{ steps.latest.outputs.tag }}"
+
+          if [ -z "$LATEST" ]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          HIGHER=$(printf '%s\n%s\n' "$LATEST" "$CURRENT" | sort -V | tail -1)
+          if [ "$HIGHER" = "$CURRENT" ] && [ "$CURRENT" != "$LATEST" ]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create release
+        if: steps.compare.outputs.should_release == 'true'
+        run: |
+          FILES="main.js manifest.json"
+          [ -f "styles.css" ] && FILES="$FILES styles.css"
+          gh release create "${{ steps.version.outputs.version }}" \
+            --title "${{ steps.version.outputs.version }}" \
+            --generate-notes \
+            $FILES
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
