@@ -52,6 +52,7 @@ function stripHtml(html) {
         .replace(/<[^>]+>/g, '')
         .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
         .replace(/&nbsp;/g, ' ').replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+        .replace(/</g, '\\<')
         .replace(/\n{3,}/g, '\n\n')
         .trim();
 }
