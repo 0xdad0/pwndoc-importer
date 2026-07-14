@@ -269,6 +269,31 @@ class ImportSourceModal extends SuggestModal {
     onChooseSuggestion(item) { this.onChoose(item.value); }
 }
 
+// ── Modal: choose locale/language before the vuln search ─────────────────────
+class LocaleModal extends SuggestModal {
+    constructor(app, locales, preferred, onChoose) {
+        super(app);
+        // locales: array of distinct locale strings present in the data
+        this.locales = locales;
+        this.onChoose = onChoose; // (locale | '') => void   '' means all locales
+        this.setPlaceholder('Select language / locale...');
+        // Put the preferred (settings) locale first if present
+        if (preferred && locales.includes(preferred)) {
+            this.locales = [preferred, ...locales.filter(l => l !== preferred)];
+        }
+    }
+    getSuggestions(query) {
+        const q = query.toLowerCase();
+        const opts = [
+            ...this.locales.map(l => ({ label: l, value: l })),
+            { label: 'All locales', value: '' },
+        ];
+        return opts.filter(o => o.label.toLowerCase().includes(q));
+    }
+    renderSuggestion(item, el) { el.createEl('div', { text: item.label }); }
+    onChooseSuggestion(item) { this.onChoose(item.value); }
+}
+
 // ── Modal: choose VT or M prefix ─────────────────────────────────────────────
 class PrefixModal extends SuggestModal {
     constructor(app, onChoose) {
@@ -503,8 +528,8 @@ class PwnDocSettingTab extends PluginSettingTab {
                 .onChange(async v => { this.plugin.settings.csvPath = v.trim(); await this.plugin.saveSettings(); }));
 
         new Setting(containerEl)
-            .setName('Locale filter')
-            .setDesc('Only show vulnerabilities with this locale in the search list')
+            .setName('Default locale')
+            .setDesc('Locale pre-selected in the language picker shown before the vuln search')
             .addDropdown(d => d
                 .addOption('EN-en', 'EN-en (English)')
                 .addOption('IT-it', 'IT-it (Italian)')
@@ -698,7 +723,7 @@ class PwnDocImporterPlugin extends Plugin {
 
     // Step 1 — load CSV and open vuln search
     async openSearchModal() {
-        const { csvPath, locale } = this.settings;
+        const { csvPath } = this.settings;
         if (!csvPath) {
             new Notice('PwnDoc Importer: set the CSV path in Settings first.');
             return;
@@ -714,17 +739,23 @@ class PwnDocImporterPlugin extends Plugin {
             return;
         }
 
-        if (locale) {
-            const filtered = rows.filter(r => r.locale === locale);
-            if (filtered.length > 0) rows = filtered;
-        }
+        this.chooseLocaleThenSearch(rows);
+    }
 
-        if (rows.length === 0) {
-            new Notice(`PwnDoc Importer: no vulnerabilities found for locale "${locale}".`);
-            return;
-        }
-
-        new VulnSearchModal(this.app, rows, vuln => this.askPrefix(vuln)).open();
+    // Ask which locale to filter by (options built from the data), then open the vuln search
+    chooseLocaleThenSearch(rows) {
+        const locales = [...new Set(rows.map(r => r.locale).filter(Boolean))].sort();
+        const openSearch = locale => {
+            const filtered = locale ? rows.filter(r => r.locale === locale) : rows;
+            if (filtered.length === 0) {
+                new Notice(`PwnDoc Importer: no vulnerabilities found for locale "${locale}".`);
+                return;
+            }
+            new VulnSearchModal(this.app, filtered, vuln => this.askPrefix(vuln)).open();
+        };
+        // Nothing to choose from → skip the extra modal
+        if (locales.length <= 1) { openSearch(locales[0] || ''); return; }
+        new LocaleModal(this.app, locales, this.settings.locale, openSearch).open();
     }
 
     // API import — step 1: ask for credentials (pre-filled from settings)
@@ -781,14 +812,8 @@ class PwnDocImporterPlugin extends Plugin {
                 }
             }
 
-            // Step 4: apply locale filter and open search
-            const { locale } = this.settings;
-            let filtered = rows;
-            if (locale) {
-                const f = rows.filter(r => r.locale === locale);
-                if (f.length > 0) filtered = f;
-            }
-            new VulnSearchModal(this.app, filtered, vuln => this.askPrefix(vuln)).open();
+            // Step 4: choose locale, then open search
+            this.chooseLocaleThenSearch(rows);
         }).open();
     }
 
