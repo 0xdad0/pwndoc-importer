@@ -159,6 +159,32 @@ async function pwndocFetchVulns(baseUrl, token, ignoreSsl) {
     return data?.datas || [];
 }
 
+async function pwndocFetchVulnDetail(baseUrl, token, id, ignoreSsl) {
+    const url = new URL(`/api/vulnerabilities/detail/${id}`, baseUrl).toString();
+    const raw = await httpsRequest(url, {
+        headers: { 'Cookie': `token= JWT ${token}` },
+        ignoreSsl,
+    });
+    const data = JSON.parse(raw);
+    return data?.datas || null;
+}
+
+// Fetch full detail for every vuln in the list, N at a time
+async function pwndocFetchAllDetails(baseUrl, token, ignoreSsl, list, dbg, onProgress) {
+    const CONCURRENCY = 5;
+    const details = [];
+    for (let i = 0; i < list.length; i += CONCURRENCY) {
+        const batch = list.slice(i, i + CONCURRENCY);
+        const results = await Promise.all(batch.map(v =>
+            pwndocFetchVulnDetail(baseUrl, token, v._id, ignoreSsl)
+                .catch(e => { dbg(`detail fetch failed for ${v._id}:`, e.message); return null; })
+        ));
+        details.push(...results.filter(Boolean));
+        if (onProgress) onProgress(Math.min(i + CONCURRENCY, list.length), list.length);
+    }
+    return details;
+}
+
 async function pwndocFetchCustomFields(baseUrl, token, ignoreSsl, dbg) {
     const url = new URL('/api/data/custom-fields', baseUrl).toString();
     dbg('pwndocFetchCustomFields: GET', url);
@@ -778,18 +804,22 @@ class PwnDocImporterPlugin extends Plugin {
         try {
             dbg('logging in to', url);
             const token = await pwndocLogin(url, username, password, ignoreSsl);
-            dbg('login OK, fetching vulns + custom fields');
-            notice.setMessage('PwnDoc Importer: fetching vulnerabilities…');
-            const [vulns, cfLabels] = await Promise.all([
+            dbg('login OK, fetching vuln list + custom fields');
+            notice.setMessage('PwnDoc Importer: fetching vulnerability list…');
+            const [list, cfLabels] = await Promise.all([
                 pwndocFetchVulns(url, token, ignoreSsl),
                 pwndocFetchCustomFields(url, token, ignoreSsl, dbg).catch(e => { dbg('custom fields fetch failed:', e.message); return {}; }),
             ]);
+            dbg(`list returned ${list.length} vulns, ${Object.keys(cfLabels).length} custom field definitions`);
+
+            const details = await pwndocFetchAllDetails(url, token, ignoreSsl, list, dbg, (done, total) => {
+                notice.setMessage(`PwnDoc Importer: fetching details ${done}/${total}…`);
+            });
             notice.hide();
 
-            dbg(`fetched ${vulns.length} vulns, ${Object.keys(cfLabels).length} custom field definitions`);
-            dbg('cfLabels map:', cfLabels);
+            dbg(`fetched full detail for ${details.length}/${list.length} vulns`);
             this.cfLabels = cfLabels;
-            rows = flattenVulnsFromApi(vulns, cfLabels);
+            rows = flattenVulnsFromApi(details, cfLabels);
             dbg(`flattened to ${rows.length} rows; sample keys:`, rows[0] ? Object.keys(rows[0]) : []);
             if (rows.length === 0) { new Notice('PwnDoc Importer: no vulnerabilities returned from API.'); return; }
         } catch (e) {

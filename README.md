@@ -90,7 +90,7 @@ Two import commands are available from the command palette (`Ctrl+P` / `Cmd+P`).
 
 1. Run **Fetch and import vulnerability from PwnDoc API**.
 2. A **credentials popup** appears, pre-filled with any values saved in settings. Adjust if needed, enable **Ignore SSL** for self-signed certs, and optionally check **Save credentials in plugin settings** to persist them.
-3. The plugin logs in, fetches all vulnerabilities and custom field definitions in parallel, then shows a **CSV output popup** pre-filled with the default output folder from settings:
+3. The plugin logs in, fetches the vulnerability list (`GET /api/vulnerabilities`) and custom field definitions in parallel, then fetches full detail (`GET /api/vulnerabilities/detail/:id`, 5 at a time) for every listed vuln — the list endpoint only returns metadata (id, cvss, category, title per locale), not description/observation/remediation. A progress notice shows `fetching details N/M…`. Once all details are in, it shows a **CSV output popup** pre-filled with the default output folder from settings:
    - Confirm the folder path to save the fetched data as `vulnerabilities.csv` for future offline use.
    - Click **Skip** to import without saving.
 4. The locale filter from settings is applied, then the usual fuzzy-search → prefix → folder → note flow continues.
