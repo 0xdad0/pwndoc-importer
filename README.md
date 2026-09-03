@@ -13,6 +13,7 @@ An [Obsidian](https://obsidian.md) plugin that imports vulnerabilities from a [P
 - Generate pre-structured notes with YAML frontmatter (severity, platform, CVSS data, OWASP category, CWE)
 - Automatically fetch custom field definitions from the API and append all non-empty custom fields as a **Custom Fields** section at the end of the note, using human-readable labels (`displaySub`)
 - Filter vulnerabilities by locale (`EN-en`, `IT-it`, or all)
+- **Quick import command** with a default source (CSV/API) and default language, ready to be bound to a hotkey
 - Choose between **VT** (Vulnerability Ticket) or **M** (Mobile) note prefixes
 - Auto-number notes sequentially (`VT-01`, `VT-02`, …)
 - Select the target vault folder interactively on each import
@@ -41,6 +42,19 @@ Open **Settings → PwnDoc Importer** to configure the plugin.
 |---|---|---|
 | **CSV file path** | *(empty)* | Absolute or vault-relative path to a PwnDoc vulnerabilities CSV export |
 | **Locale filter** | `EN-en` | Filter vulnerabilities by language (`EN-en`, `IT-it`, or `All`) |
+
+### Quick import
+
+Options for the **Quick import vulnerability** command (bind it to a hotkey in *Settings → Hotkeys*). It skips the source and language pickers by using the defaults below; the VT/M prefix and target folder are still asked per import.
+
+| Setting | Default | Description |
+|---|---|---|
+| **Default source** | `CSV — local file` | Where the quick import fetches vulnerabilities from (CSV or PwnDoc API) |
+| **Default language** | `All locales` | Locale filter applied before opening the vuln list |
+
+Notes:
+- With the **API** source, the quick import connects with the credentials saved in settings (it won't prompt for them) and silently saves `vulnerabilities.csv` to the *Default CSV output folder* when that folder is set — otherwise it skips saving. It also skips the CSV-output popup.
+- If the configured language isn't present in the data, the quick import falls back to showing all locales with a notice.
 
 ### Custom field IDs
 
@@ -76,7 +90,13 @@ If any credential field is left blank, the plugin will prompt for credentials at
 
 ## Usage
 
-Two import commands are available from the command palette (`Ctrl+P` / `Cmd+P`).
+Three import commands are available from the command palette (`Ctrl+P` / `Cmd+P`); any of them can be assigned a hotkey in *Settings → Hotkeys*.
+
+### Quick import
+
+1. Run **Quick import vulnerability** (or its hotkey).
+2. The plugin fetches the vuln list from the default source (CSV or API) and applies the default language filter — no source or language picker.
+3. Search for the vulnerability in the fuzzy-search modal, then continue with the usual prefix → folder → note flow.
 
 ### From CSV
 

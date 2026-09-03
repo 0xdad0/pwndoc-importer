@@ -243,6 +243,8 @@ function flattenVulnsFromApi(vulns, cfLabels = {}) {
 const DEFAULT_SETTINGS = {
     csvPath:         '',
     locale:          'EN-en',
+    quickImportSource: 'csv', // 'csv' | 'api'
+    quickImportLocale: '',    // '' = all locales
     owaspFieldId:    'cf_62d92f1597c7c5001833273f',
     cweFieldId:      'cf_63ab317fafe66f0011b89881',
     apiUrl:          '',
@@ -563,6 +565,31 @@ class PwnDocSettingTab extends PluginSettingTab {
                 .setValue(this.plugin.settings.locale)
                 .onChange(async v => { this.plugin.settings.locale = v; await this.plugin.saveSettings(); }));
 
+        containerEl.createEl('h3', { text: 'Quick import' });
+        containerEl.createEl('p', {
+            text: 'Options for the "Quick import vulnerability" command (assign it a hotkey in Settings → Hotkeys). Skips the source and language pickers by using the defaults below.',
+            cls: 'setting-item-description',
+        });
+
+        new Setting(containerEl)
+            .setName('Default source')
+            .setDesc('Where the quick import fetches vulnerabilities from')
+            .addDropdown(d => d
+                .addOption('csv', 'CSV — local file')
+                .addOption('api', 'API — live PwnDoc server')
+                .setValue(this.plugin.settings.quickImportSource)
+                .onChange(async v => { this.plugin.settings.quickImportSource = v; await this.plugin.saveSettings(); }));
+
+        new Setting(containerEl)
+            .setName('Default language')
+            .setDesc('Locale filter applied before opening the vuln list in the quick import')
+            .addDropdown(d => d
+                .addOption('EN-en', 'EN-en (English)')
+                .addOption('IT-it', 'IT-it (Italian)')
+                .addOption('', 'All locales')
+                .setValue(this.plugin.settings.quickImportLocale)
+                .onChange(async v => { this.plugin.settings.quickImportLocale = v; await this.plugin.saveSettings(); }));
+
         containerEl.createEl('h3', { text: 'Custom field IDs' });
         containerEl.createEl('p', {
             text: 'cf_<objectId> column names in the CSV for OWASP and CWE values.',
@@ -736,6 +763,11 @@ class PwnDocImporterPlugin extends Plugin {
             name: 'Fetch and import vulnerability from PwnDoc API',
             callback: () => this.openApiImportModal(),
         });
+        this.addCommand({
+            id: 'quick-import-vuln',
+            name: 'Quick import vulnerability (use default source and language)',
+            callback: () => this.quickImport(),
+        });
     }
 
     async loadSettings() {
@@ -748,7 +780,7 @@ class PwnDocImporterPlugin extends Plugin {
     }
 
     // Step 1 — load CSV and open vuln search
-    async openSearchModal() {
+    async openSearchModal({ quick = false } = {}) {
         const { csvPath } = this.settings;
         if (!csvPath) {
             new Notice('PwnDoc Importer: set the CSV path in Settings first.');
@@ -765,11 +797,25 @@ class PwnDocImporterPlugin extends Plugin {
             return;
         }
 
-        this.chooseLocaleThenSearch(rows);
+        this.chooseLocaleThenSearch(rows, { quick });
+    }
+
+    // Quick import — single command driven by the default source/language settings
+    quickImport() {
+        if (this.settings.quickImportSource === 'api') {
+            if (!this.settings.apiUrl || !this.settings.apiUsername || !this.settings.apiPassword) {
+                new Notice('PwnDoc Importer: save API credentials in Settings to use the quick API import.');
+                return;
+            }
+            const { apiUrl: url, apiUsername: username, apiPassword: password, apiIgnoreSsl: ignoreSsl } = this.settings;
+            this.fetchFromApi({ url, username, password, ignoreSsl, save: false, quick: true });
+        } else {
+            this.openSearchModal({ quick: true });
+        }
     }
 
     // Ask which locale to filter by (options built from the data), then open the vuln search
-    chooseLocaleThenSearch(rows) {
+    chooseLocaleThenSearch(rows, { quick = false } = {}) {
         const locales = [...new Set(rows.map(r => r.locale).filter(Boolean))].sort();
         const openSearch = locale => {
             const filtered = locale ? rows.filter(r => r.locale === locale) : rows;
@@ -779,6 +825,14 @@ class PwnDocImporterPlugin extends Plugin {
             }
             new VulnSearchModal(this.app, filtered, vuln => this.askPrefix(vuln)).open();
         };
+        if (quick) {
+            const pref = this.settings.quickImportLocale || '';
+            if (pref && !locales.includes(pref)) {
+                new Notice(`PwnDoc Importer: locale "${pref}" not present in the data — showing all locales.`);
+                return openSearch('');
+            }
+            return openSearch(pref);
+        }
         // Nothing to choose from → skip the extra modal
         if (locales.length <= 1) { openSearch(locales[0] || ''); return; }
         new LocaleModal(this.app, locales, this.settings.locale, openSearch).open();
@@ -790,7 +844,7 @@ class PwnDocImporterPlugin extends Plugin {
     }
 
     // API import — step 2: connect, optionally save CSV, then open vuln search
-    async fetchFromApi({ url, username, password, ignoreSsl, save }) {
+    async fetchFromApi({ url, username, password, ignoreSsl, save, quick = false }) {
         if (save) {
             this.settings.apiUrl      = url;
             this.settings.apiUsername = username;
@@ -829,7 +883,22 @@ class PwnDocImporterPlugin extends Plugin {
             return;
         }
 
-        // Step 3: ask where to save the CSV (or skip)
+        // Step 3: ask where to save the CSV (or skip). In quick mode, silently save
+        // to the default output folder when set, otherwise skip saving entirely.
+        if (quick) {
+            if (this.settings.csvOutputFolder) {
+                try {
+                    const sep = this.settings.csvOutputFolder.includes('\\') ? '\\' : '/';
+                    const csvPath = this.settings.csvOutputFolder.replace(/[\\/]+$/, '') + sep + 'vulnerabilities.csv';
+                    require('fs').writeFileSync(csvPath, rowsToCsv(rows), 'utf8');
+                    this.dbg(`quick import: CSV auto-saved to ${csvPath}`);
+                } catch (e) {
+                    this.dbg(`quick import: auto-save failed: ${e.message}`);
+                }
+            }
+            return this.chooseLocaleThenSearch(rows, { quick: true });
+        }
+
         new CsvOutputModal(this.app, this.settings.csvOutputFolder, async csvPath => {
             if (csvPath) {
                 try {
